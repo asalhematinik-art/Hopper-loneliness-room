@@ -1,0 +1,943 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hopper — Interior Loneliness</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:#000; overflow:hidden; font-family:'Georgia', serif; }
+
+#vignette {
+  position:fixed; inset:0; pointer-events:none; z-index:80;
+  background: radial-gradient(ellipse 72% 72% at 50% 50%,
+    transparent 52%, rgba(0,0,0,0.18) 72%, rgba(0,0,0,0.38) 100%);
+}
+
+#info {
+  position:absolute; top:22px; left:22px; color:rgba(255,255,255,0.55);
+  background:rgba(0,0,0,0.0); padding:0; font-size:12px;
+  z-index:100; line-height:1.9; letter-spacing:0.04em;
+  font-style:italic;
+}
+
+#controls {
+  position:absolute; bottom:22px; left:50%; transform:translateX(-50%);
+  background:rgba(0,0,0,0.45); padding:10px 22px; border-radius:20px;
+  color:rgba(255,255,255,0.45); font-size:11px; z-index:100;
+  letter-spacing:0.05em;
+}
+
+#caption {
+  position:absolute; bottom:70px; left:50%; transform:translateX(-50%);
+  color:rgba(255,255,255,0.0); font-size:13px; z-index:100;
+  font-style:italic; letter-spacing:0.08em; text-align:center;
+  transition:color 3s ease;
+  white-space:nowrap;
+}
+
+#loading {
+  position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
+  color:rgba(255,255,255,0.6); font-size:18px; z-index:1000;
+  font-style:italic; letter-spacing:0.1em;
+}
+</style>
+</head>
+<body>
+<div id="loading">entering the room…</div>
+<div id="vignette"></div>
+<div id="info">
+  ✦ Hopper — Interior<br>
+  <small style="opacity:0.7">Move: W A S D &nbsp;·&nbsp; Look: Mouse</small>
+</div>
+<div id="caption" id="caption"></div>
+<div id="controls">W A S D — move &nbsp;·&nbsp; Mouse — look &nbsp;·&nbsp; F — fullscreen</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+// ─────────────────────────────────────────────
+// CORE VOCABULARY:
+//   window · directional light · stillness
+//   void · interior enclosure · voyeuristic viewpoint
+//
+// EMOTIONAL TARGET: loneliness (low arousal, negative valence)
+// NOT: fear (high arousal). No threat. No darkness. No locked doors.
+// The world continues outside. You are simply not in it.
+// ─────────────────────────────────────────────
+
+const CFG = {
+  // Room — proportions of a real apartment room, not a cell
+  rW: 10, rH: 3.6, rD: 9,
+  camH: 1.62,
+  moveSpeed: 2.8,
+  mouseSens: 0.0016,
+  bound: 4.2,
+
+  // Lighting — overcast afternoon, cool grey-white
+  // Low arousal = dim but NOT dark. Think 3pm cloudy sky.
+  ambientCol:   0xb8c4cc,   // cool grey ambient
+  ambientInt:   0.55,       // clearly visible, not threatening
+  dirCol:       0xd0dce8,   // cool daylight directional
+  dirInt:       0.72,
+  windowGlowCol:0x8fb0c8,   // cool blue-grey window bleed
+  windowGlowInt:0.38,
+
+  // Fog — gentle atmospheric depth, not darkness
+  fogCol: 0xc8cfd4,
+  fogNear: 14,
+  fogFar:  22,
+};
+
+let scene, camera, renderer, clock;
+let mF=false,mB=false,mL=false,mR=false;
+const vel = new THREE.Vector3();
+
+function buildCityTexture() {
+  // Voyeuristic viewpoint — crowded city outside, you are alone inside.
+  // Overcast afternoon. Every window across the street has a life in it.
+  const W=1024, H=512;
+  const cv = document.createElement('canvas');
+  cv.width=W; cv.height=H;
+  const ctx = cv.getContext('2d');
+
+  // Sky — overcast, pale grey-blue layered
+  const sky = ctx.createLinearGradient(0,0,0,H*0.6);
+  sky.addColorStop(0,   '#9aaebb');
+  sky.addColorStop(0.5, '#b8c8d4');
+  sky.addColorStop(1,   '#ccd6dc');
+  ctx.fillStyle = sky;
+  ctx.fillRect(0,0,W,H);
+
+  // ── LAYER 1: far background buildings (small, hazy, blue-grey) ──
+  const farBlds = [
+    {x:-5, w:55, h:95},  {x:48, w:38, h:120}, {x:82, w:62, h:80},
+    {x:138,w:45, h:110}, {x:178,w:55, h:90},  {x:228,w:70, h:105},
+    {x:292,w:40, h:130}, {x:328,w:58, h:88},  {x:380,w:48, h:115},
+    {x:422,w:65, h:95},  {x:480,w:42, h:125}, {x:518,w:55, h:85},
+    {x:568,w:72, h:108}, {x:634,w:38, h:92},  {x:666,w:55, h:118},
+    {x:715,w:48, h:88},  {x:756,w:62, h:102}, {x:812,w:45, h:128},
+    {x:850,w:58, h:85},  {x:902,w:70, h:110}, {x:965,w:50, h:95},
+  ];
+  farBlds.forEach(b => {
+    ctx.fillStyle = `hsl(210,10%,${55+Math.random()*10}%)`;
+    ctx.fillRect(b.x, H-b.h, b.w, b.h);
+    // A few hazy windows — barely visible
+    const cols=Math.floor((b.w-4)/8), rows=Math.floor((b.h-10)/10);
+    for(let r=0;r<rows;r++) for(let c=0;c<cols;c++) {
+      if(Math.random()<0.22){
+        ctx.fillStyle=`rgba(255,230,160,${0.25+Math.random()*0.2})`;
+        ctx.fillRect(b.x+3+c*8, H-b.h+6+r*10, 4,5);
+      }
+    }
+  });
+
+  // ── LAYER 2: mid-ground buildings (main mass, lots of lit windows) ──
+  const midBlds = [
+    {x:0,  w:75, h:195}, {x:70, w:48, h:240}, {x:112,w:85, h:170},
+    {x:190,w:52, h:260}, {x:236,w:68, h:185}, {x:298,w:55, h:230},
+    {x:348,w:92, h:160}, {x:432,w:48, h:255}, {x:474,w:72, h:175},
+    {x:540,w:58, h:245}, {x:592,w:80, h:165}, {x:665,w:45, h:235},
+    {x:704,w:75, h:180}, {x:772,w:55, h:250}, {x:820,w:88, h:168},
+    {x:900,w:50, h:240}, {x:944,w:68, h:178},
+  ];
+  midBlds.forEach(b => {
+    // Slightly darker than far buildings — more presence
+    ctx.fillStyle = `hsl(210,7%,${38+Math.random()*10}%)`;
+    ctx.fillRect(b.x, H-b.h, b.w, b.h);
+    // Dense lit windows — CROWDED = life happening everywhere except here
+    const cols=Math.floor((b.w-6)/9), rows=Math.floor((b.h-12)/12);
+    for(let r=0;r<rows;r++) for(let c=0;c<cols;c++) {
+      if(Math.random()<0.48){
+        const warm=Math.random()>0.25;
+        const wx=b.x+4+c*9, wy=H-b.h+8+r*12;
+        ctx.fillStyle = warm
+          ? `rgba(255,${210+Math.floor(Math.random()*35)},${90+Math.floor(Math.random()*70)},${0.6+Math.random()*0.3})`
+          : `rgba(190,215,255,${0.45+Math.random()*0.3})`;
+        ctx.fillRect(wx,wy,5,7);
+        // Soft glow halo around each lit window
+        const grd=ctx.createRadialGradient(wx+2,wy+3,0,wx+2,wy+3,7);
+        grd.addColorStop(0, warm?'rgba(255,200,80,0.14)':'rgba(140,180,255,0.12)');
+        grd.addColorStop(1,'rgba(0,0,0,0)');
+        ctx.fillStyle=grd;
+        ctx.fillRect(wx-5,wy-4,16,16);
+      }
+    }
+  });
+
+  // ── LAYER 3: foreground street (closest buildings, across the street) ──
+  // These are the windows you can almost see into — voyeuristic core
+  const fgBlds = [
+    {x:-8, w:110,h:H*0.55}, {x:95, w:80, h:H*0.48},
+    {x:168,w:95, h:H*0.58}, {x:256,w:75, h:H*0.45},
+    {x:324,w:105,h:H*0.52}, {x:420,w:88, h:H*0.60},
+    {x:500,w:95, h:H*0.47}, {x:587,w:80, h:H*0.55},
+    {x:660,w:110,h:H*0.50}, {x:762,w:88, h:H*0.57},
+    {x:842,w:95, h:H*0.44}, {x:930,w:85, h:H*0.53},
+  ];
+  fgBlds.forEach(b => {
+    b.h = Math.round(b.h);
+    ctx.fillStyle = `hsl(210,6%,${32+Math.random()*8}%)`;
+    ctx.fillRect(b.x, H-b.h, b.w, b.h);
+    // Large, clearly visible windows — you can see silhouettes in these
+    const cols=Math.floor((b.w-8)/16), rows=Math.floor((b.h-14)/20);
+    for(let r=0;r<rows;r++) for(let c=0;c<cols;c++) {
+      const wx=b.x+6+c*16, wy=H-b.h+10+r*20;
+      const lit=Math.random()<0.6;
+      if(lit){
+        const warm=Math.random()>0.2;
+        ctx.fillStyle = warm
+          ? `rgba(255,${205+Math.floor(Math.random()*40)},${85+Math.floor(Math.random()*80)},${0.72+Math.random()*0.22})`
+          : `rgba(210,230,255,${0.55+Math.random()*0.3})`;
+        ctx.fillRect(wx,wy,10,13);
+        // Silhouette in some windows — a figure at a desk, a shadow moving
+        if(Math.random()<0.28){
+          ctx.fillStyle='rgba(20,15,10,0.45)';
+          // head
+          ctx.beginPath();
+          ctx.arc(wx+5, wy+5, 2.5, 0, Math.PI*2);
+          ctx.fill();
+          // body
+          ctx.fillRect(wx+3,wy+7,4,5);
+        }
+        // Window glow spill on building facade
+        const grd=ctx.createRadialGradient(wx+5,wy+6,0,wx+5,wy+6,12);
+        grd.addColorStop(0,warm?'rgba(255,190,60,0.18)':'rgba(150,200,255,0.15)');
+        grd.addColorStop(1,'rgba(0,0,0,0)');
+        ctx.fillStyle=grd;
+        ctx.fillRect(wx-8,wy-6,26,26);
+      } else {
+        // Dark windows — someone not home, or blinds drawn
+        ctx.fillStyle='rgba(15,18,22,0.55)';
+        ctx.fillRect(wx,wy,10,13);
+      }
+    }
+  });
+
+  // ── STREET LEVEL — busy, crowded ──
+  // Pavement
+  ctx.fillStyle='rgba(148,150,152,0.85)';
+  ctx.fillRect(0, H-38, W, 38);
+  // Pavement detail — wet reflection strip
+  ctx.fillStyle='rgba(180,190,200,0.22)';
+  ctx.fillRect(0, H-18, W, 10);
+
+  // Crowd of pedestrians — many small figures (you are not among them)
+  for(let i=0;i<55;i++){
+    const px=Math.random()*W;
+    const py=H-32+Math.random()*18;
+    const figH=6+Math.random()*5;
+    ctx.fillStyle=`rgba(${30+Math.floor(Math.random()*40)},${28+Math.floor(Math.random()*35)},${25+Math.floor(Math.random()*35)},${0.55+Math.random()*0.35})`;
+    // body
+    ctx.fillRect(px-2, py-figH, 4, figH);
+    // head
+    ctx.beginPath();
+    ctx.arc(px, py-figH-2.5, 2.2, 0, Math.PI*2);
+    ctx.fill();
+  }
+
+  // ── Parked cars ──
+  for(let i=0;i<6;i++){
+    const cx=40+i*160+Math.random()*30;
+    ctx.fillStyle=`hsl(${200+Math.random()*40},${8+Math.random()*12}%,${35+Math.random()*15}%)`;
+    ctx.fillRect(cx, H-26, 55, 16);
+    // windshield glint
+    ctx.fillStyle='rgba(200,220,240,0.3)';
+    ctx.fillRect(cx+8, H-24, 18, 6);
+  }
+
+  // Atmospheric overcast haze overlay
+  ctx.fillStyle='rgba(175,188,198,0.14)';
+  ctx.fillRect(0,0,W,H);
+
+  // Very subtle rain streaks — overcast suggests recent rain
+  ctx.strokeStyle='rgba(190,200,210,0.12)';
+  ctx.lineWidth=0.5;
+  for(let i=0;i<40;i++){
+    const rx=Math.random()*W;
+    ctx.beginPath();
+    ctx.moveTo(rx, 0);
+    ctx.lineTo(rx-4, H);
+    ctx.stroke();
+  }
+
+  const tex = new THREE.CanvasTexture(cv);
+  tex.needsUpdate = true;
+  return tex;
+}
+
+function init() {
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(CFG.fogCol);
+  // Gentle fog — not darkness, just depth
+  scene.fog = new THREE.Fog(CFG.fogCol, CFG.fogNear, CFG.fogFar);
+
+  camera = new THREE.PerspectiveCamera(72, innerWidth/innerHeight, 0.1, 60);
+  camera.position.set(0, CFG.camH, CFG.rD/2 - 1.5);
+
+  renderer = new THREE.WebGLRenderer({antialias:true});
+  renderer.setSize(innerWidth, innerHeight);
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  // Neutral tone mapping — no dramatic cinematic crush
+  renderer.toneMapping = THREE.LinearToneMapping;
+  renderer.toneMappingExposure = 1.05;
+  document.body.appendChild(renderer.domElement);
+
+  clock = new THREE.Clock();
+
+  // ── LIGHTING ──────────────────────────────────────────
+  // DESIGN PRINCIPLE: loneliness lives in ordinary light.
+  // A room lit by overcast afternoon daylight through one window.
+  // Not dark. Not dramatic. Just... still.
+
+  // Cool ambient — the grey light that fills everything equally
+  const ambient = new THREE.AmbientLight(CFG.ambientCol, CFG.ambientInt);
+  scene.add(ambient);
+
+  // Single directional light entering from window (left wall)
+  // This IS the vocabulary: one directional light, one window, one source
+  const dir = new THREE.DirectionalLight(CFG.dirCol, CFG.dirInt);
+  dir.position.set(-8, 4, 2);
+  dir.target.position.set(3, 0, -1);
+  dir.castShadow = true;
+  dir.shadow.mapSize.set(2048,2048);
+  dir.shadow.camera.near = 0.5;
+  dir.shadow.camera.far  = 25;
+  dir.shadow.camera.left = -8;
+  dir.shadow.camera.right= 8;
+  dir.shadow.camera.top  = 6;
+  dir.shadow.camera.bottom=-6;
+  dir.shadow.bias = -0.0002;
+  scene.add(dir);
+  scene.add(dir.target);
+
+  // Window bleed — cool blue-grey pool on floor
+  const winGlow = new THREE.PointLight(CFG.windowGlowCol, CFG.windowGlowInt, 7);
+  winGlow.position.set(-CFG.rW/2+0.5, 1.8, 0.5);
+  scene.add(winGlow);
+
+  // Soft secondary bounce from floor — very faint warm
+  const bounce = new THREE.PointLight(0xd4c8b0, 0.08, 8);
+  bounce.position.set(0, 0.1, 0);
+  scene.add(bounce);
+
+  buildRoom();
+  buildWindow();
+  buildFurniture();
+  buildVoid();
+  setupControls();
+  setupAudio();
+
+  setTimeout(()=>{
+    document.getElementById('loading').style.display='none';
+    // Delayed caption — arrives like a thought
+    setTimeout(()=>{
+      const cap = document.getElementById('caption');
+      cap.textContent = 'the room is the same as yesterday.';
+      cap.style.color = 'rgba(255,255,255,0.28)';
+      setTimeout(()=>{ cap.style.color='rgba(255,255,255,0.0)'; }, 7000);
+    }, 4000);
+  }, 900);
+
+  animate();
+}
+
+function buildRoom() {
+  // VOCABULARY: interior enclosure
+  // Proportions of a real inhabited room — not a cell, not a vast hall.
+  // Standard apartment: 10 x 9 x 3.6m
+  // Walls: warm off-white plaster — the color of rooms that once had people in them
+
+  const plaster = new THREE.MeshStandardMaterial({
+    color: 0xddd8ce, roughness: 0.92, metalness: 0.0
+  });
+  const plasterDark = new THREE.MeshStandardMaterial({
+    color: 0xccc6bb, roughness: 0.94, metalness: 0.0
+  });
+
+  // Floor — worn wood, pale
+  const floorMat = new THREE.MeshStandardMaterial({
+    color: 0xb8a888, roughness: 0.88, metalness: 0.02
+  });
+  const floor = new THREE.Mesh(
+    new THREE.PlaneGeometry(CFG.rW, CFG.rD, 12, 12), floorMat
+  );
+  floor.rotation.x = -Math.PI/2;
+  floor.receiveShadow = true;
+  scene.add(floor);
+
+  // Floor boards — thin lines giving depth and perspective convergence
+  // VOCABULARY: directional lines emphasize the void of the room
+  const boardMat = new THREE.LineBasicMaterial({color:0x9a8868, transparent:true, opacity:0.28});
+  for(let i=-4;i<=4;i++) {
+    const pts = [
+      new THREE.Vector3(i*1.1, 0.003, CFG.rD/2),
+      new THREE.Vector3(i*1.1, 0.003, -CFG.rD/2)
+    ];
+    scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), boardMat));
+  }
+
+  // Ceiling — slightly darker, feels like weight above
+  const ceil = new THREE.Mesh(
+    new THREE.PlaneGeometry(CFG.rW, CFG.rD), plasterDark
+  );
+  ceil.rotation.x = Math.PI/2;
+  ceil.position.y = CFG.rH;
+  scene.add(ceil);
+
+  // Back wall
+  const bw = new THREE.Mesh(new THREE.PlaneGeometry(CFG.rW, CFG.rH), plaster);
+  bw.position.set(0, CFG.rH/2, -CFG.rD/2);
+  bw.receiveShadow = true;
+  scene.add(bw);
+
+  // Left wall (window wall) — slightly cooler from daylight
+  const lwMat = new THREE.MeshStandardMaterial({color:0xd4d0c8, roughness:0.92});
+  const lw = new THREE.Mesh(new THREE.PlaneGeometry(CFG.rD, CFG.rH), lwMat);
+  lw.position.set(-CFG.rW/2, CFG.rH/2, 0);
+  lw.rotation.y = Math.PI/2;
+  lw.receiveShadow = true;
+  scene.add(lw);
+
+  // Right wall
+  const rw = new THREE.Mesh(new THREE.PlaneGeometry(CFG.rD, CFG.rH), plaster);
+  rw.position.set(CFG.rW/2, CFG.rH/2, 0);
+  rw.rotation.y = -Math.PI/2;
+  rw.receiveShadow = true;
+  scene.add(rw);
+
+  // Baseboard trim
+  const trimMat = new THREE.MeshStandardMaterial({color:0xe8e0d4, roughness:0.7});
+  const trimH = 0.1;
+  [[0,0,-CFG.rD/2,CFG.rW,0],[-CFG.rW/2,Math.PI/2,0,CFG.rD,0],[CFG.rW/2,-Math.PI/2,0,CFG.rD,0]].forEach(([x,ry,z,w])=>{
+    const t = new THREE.Mesh(new THREE.BoxGeometry(w, trimH, 0.05), trimMat);
+    t.position.set(x, trimH/2, z);
+    t.rotation.y = ry;
+    scene.add(t);
+  });
+
+  // Ceiling cornice — subtle
+  const cornMat = new THREE.MeshStandardMaterial({color:0xe0dcd4, roughness:0.8});
+  const cornH = 0.08;
+  const corniceBack = new THREE.Mesh(new THREE.BoxGeometry(CFG.rW+0.1, cornH, 0.12), cornMat);
+  corniceBack.position.set(0, CFG.rH-cornH/2, -CFG.rD/2+0.06);
+  scene.add(corniceBack);
+}
+
+function buildWindow() {
+  // VOCABULARY: window — the most important element.
+  // The window is where the world is. You are on the inside.
+  // VOYEURISTIC VIEWPOINT: you look out, they are in their lives.
+  // The window does NOT threaten. It simply shows you what you are not part of.
+
+  const wW = 1.6, wH = 2.2;
+  const wX = -CFG.rW/2 + 0.05;
+  const wY = 1.1; // sill height — window from 1.1 to 3.3m, eye level visible
+  const wZ = 0.8; // slightly forward of center
+
+  // Frame — painted white wood
+  const frameMat = new THREE.MeshStandardMaterial({color:0xf0ece4, roughness:0.7});
+
+  // Outer frame
+  const frameOuter = new THREE.Mesh(new THREE.BoxGeometry(0.1, wH+0.2, 0.14), frameMat);
+  frameOuter.position.set(wX+0.04, wY+wH/2, wZ);
+  scene.add(frameOuter);
+
+  [[0,wH/2+0.05,wW+0.1,0.1],[0,-0.12,wW+0.1,0.1],[wW/2+0.03,wH/2,0.1,wH],[-(wW/2+0.03),wH/2,0.1,wH]].forEach(([ox,oy,fw,fh])=>{
+    const f = new THREE.Mesh(new THREE.BoxGeometry(fw, fh, 0.14), frameMat);
+    f.position.set(wX+0.04+ox, wY+oy, wZ);
+    scene.add(f);
+  });
+
+  // Horizontal divider bar
+  const hBar = new THREE.Mesh(new THREE.BoxGeometry(wW, 0.06, 0.10), frameMat);
+  hBar.position.set(wX+0.05, wY+wH*0.52, wZ);
+  scene.add(hBar);
+
+  // Vertical divider bar
+  const vBar = new THREE.Mesh(new THREE.BoxGeometry(0.06, wH, 0.10), frameMat);
+  vBar.position.set(wX+0.05, wY+wH/2, wZ);
+  scene.add(vBar);
+
+  // GLASS — the outside world visible, slightly cool reflection
+  // City texture = voyeuristic content: life is there, you are here
+  const cityTex = buildCityTexture();
+  const glassMat = new THREE.MeshPhysicalMaterial({
+    map: cityTex,
+    color: 0xeef2f5,
+    transparent: true,
+    opacity: 0.88,
+    roughness: 0.05,
+    metalness: 0.0,
+    transmission: 0.1,
+  });
+  const glass = new THREE.Mesh(new THREE.PlaneGeometry(wW, wH), glassMat);
+  glass.position.set(wX+0.08, wY+wH/2, wZ);
+  glass.rotation.y = Math.PI/2;
+  scene.add(glass);
+
+  // Window sill — depth cue, invites leaning
+  const sillMat = new THREE.MeshStandardMaterial({color:0xe8e2d8, roughness:0.75});
+  const sill = new THREE.Mesh(new THREE.BoxGeometry(wW+0.2, 0.06, 0.22), sillMat);
+  sill.position.set(wX+0.08, wY-0.04, wZ);
+  sill.rotation.y = Math.PI/2;
+  sill.castShadow = true;
+  scene.add(sill);
+
+  // Light PATCH on floor from window — the visible mark of outside
+  // This is directional light's shadow cast — shows window geometry on floor
+  const patchMat = new THREE.MeshStandardMaterial({
+    color: 0xd8e4ee, transparent:true, opacity:0.22, roughness:1.0
+  });
+  const patch = new THREE.Mesh(new THREE.PlaneGeometry(1.8, 2.5), patchMat);
+  patch.rotation.x = -Math.PI/2;
+  patch.position.set(-CFG.rW/2+2.2, 0.005, wZ+0.3);
+  scene.add(patch);
+
+  // Curtain — one side only (half-drawn, like someone left in a hurry or never came back)
+  // Curtain = evidence of habitation, now still
+  const curtMat = new THREE.MeshStandardMaterial({
+    color: 0xd4cfc0, roughness:0.95, side:THREE.DoubleSide,
+    transparent:true, opacity:0.88
+  });
+  // Only LEFT curtain panel — right side open to world (voyeuristic)
+  const curtL = new THREE.Mesh(new THREE.PlaneGeometry(0.55, wH+0.3), curtMat);
+  curtL.position.set(wX+0.1, wY+wH/2+0.05, wZ-wW*0.28);
+  curtL.rotation.y = Math.PI/2;
+  scene.add(curtL);
+}
+
+function buildFurniture() {
+  // VOCABULARY: interior enclosure — the room has been lived in.
+  // PRINCIPLE: absence of people, presence of their traces.
+  // No one is here. Someone was.
+
+  // ── TABLE (small, near window — the classic Hopper position) ──
+  const tableMat = new THREE.MeshStandardMaterial({color:0x8a7a62, roughness:0.82, metalness:0.05});
+  const tableTop = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.04, 0.55), tableMat);
+  tableTop.position.set(-1.8, 0.74, 0.8);
+  tableTop.castShadow = tableTop.receiveShadow = true;
+  scene.add(tableTop);
+
+  for(let i=0;i<4;i++) {
+    const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.025,0.025,0.74), tableMat);
+    leg.position.set(-1.8+(i<2?0.38:-0.38), 0.37, 0.8+(i%2?0.22:-0.22));
+    leg.castShadow = true;
+    scene.add(leg);
+  }
+
+  // ── COFFEE CUP (at window table — someone sat here, now gone) ──
+  const cupMat = new THREE.MeshStandardMaterial({color:0xf2ece2, roughness:0.6, metalness:0.1});
+  const cup = new THREE.Mesh(new THREE.CylinderGeometry(0.042,0.036,0.085,18), cupMat);
+  cup.position.set(-1.65, 0.785, 0.72);
+  cup.castShadow = true;
+  scene.add(cup);
+  // Coffee inside — gone cold
+  const coffee = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.039,0.034,0.04,18),
+    new THREE.MeshStandardMaterial({color:0x4a3020, roughness:0.3})
+  );
+  coffee.position.set(-1.65, 0.758, 0.72);
+  scene.add(coffee);
+  // Handle
+  const handle = new THREE.Mesh(
+    new THREE.TorusGeometry(0.028,0.007,8,16,Math.PI),
+    cupMat
+  );
+  handle.position.set(-1.61, 0.785, 0.72);
+  handle.rotation.set(0, -Math.PI/2, Math.PI/2);
+  scene.add(handle);
+
+  // Saucer
+  const saucer = new THREE.Mesh(new THREE.CylinderGeometry(0.07,0.065,0.01,18), cupMat);
+  saucer.position.set(-1.65, 0.77, 0.72);
+  scene.add(saucer);
+
+  // ── SECOND CUP — the one for someone who didn't come ──
+  // This is the loneliness object. A second cup, untouched.
+  const cup2 = new THREE.Mesh(new THREE.CylinderGeometry(0.042,0.036,0.085,18), cupMat);
+  cup2.position.set(-1.92, 0.785, 0.88);
+  cup2.castShadow = true;
+  scene.add(cup2);
+  // Empty — no coffee inside
+  const saucer2 = new THREE.Mesh(new THREE.CylinderGeometry(0.07,0.065,0.01,18), cupMat);
+  saucer2.position.set(-1.92, 0.77, 0.88);
+  scene.add(saucer2);
+
+  // ── CHAIR (at window table, slightly angled — recently occupied) ──
+  const chairMat = new THREE.MeshStandardMaterial({color:0x7a6850, roughness:0.88, metalness:0.03});
+  const seat = new THREE.Mesh(new THREE.BoxGeometry(0.52,0.04,0.48), chairMat);
+  seat.position.set(-1.8, 0.78, -0.22);
+  seat.rotation.y = 0.15; // slightly angled — someone just left
+  seat.castShadow = seat.receiveShadow = true;
+  scene.add(seat);
+  const back = new THREE.Mesh(new THREE.BoxGeometry(0.52,0.58,0.04), chairMat);
+  back.position.set(-1.8, 1.09, -0.46);
+  back.rotation.y = 0.15;
+  back.castShadow = true;
+  scene.add(back);
+  for(let i=0;i<4;i++) {
+    const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.022,0.022,0.78), chairMat);
+    const a = 0.15;
+    const ox = (i<2?0.22:-0.22), oz = (i%2?0.20:-0.20);
+    leg.position.set(
+      -1.8 + ox*Math.cos(a) - oz*Math.sin(a),
+      0.39,
+      -0.22 + ox*Math.sin(a) + oz*Math.cos(a)
+    );
+    leg.castShadow = true;
+    scene.add(leg);
+  }
+
+  // ── SECOND CHAIR (across the table — pulled OUT, empty) ──
+  // No one sat down. Or they left without pushing it back.
+  const seat2 = new THREE.Mesh(new THREE.BoxGeometry(0.52,0.04,0.48), chairMat);
+  seat2.position.set(-1.8, 0.78, 1.8);
+  seat2.castShadow = seat2.receiveShadow = true;
+  scene.add(seat2);
+  const back2 = new THREE.Mesh(new THREE.BoxGeometry(0.52,0.58,0.04), chairMat);
+  back2.position.set(-1.8, 1.09, 2.06);
+  back2.castShadow = true;
+  scene.add(back2);
+  for(let i=0;i<4;i++) {
+    const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.022,0.022,0.78), chairMat);
+    leg.position.set(-1.8+(i<2?0.22:-0.22), 0.39, 1.8+(i%2?0.20:-0.20));
+    leg.castShadow = true;
+    scene.add(leg);
+  }
+
+  // ── OPEN BOOK (face-down on table — mid-sentence, abandoned) ──
+  const bookMat = new THREE.MeshStandardMaterial({color:0x6a5840, roughness:0.88});
+  const bookCover = new THREE.Mesh(new THREE.BoxGeometry(0.22,0.03,0.16), bookMat);
+  bookCover.position.set(-1.95, 0.775, 0.64);
+  bookCover.rotation.y = -0.4;
+  bookCover.castShadow = true;
+  scene.add(bookCover);
+  const pages = new THREE.Mesh(
+    new THREE.BoxGeometry(0.21,0.025,0.15),
+    new THREE.MeshStandardMaterial({color:0xf5f0e6, roughness:0.95})
+  );
+  pages.position.set(-1.95, 0.78, 0.64);
+  pages.rotation.y = -0.4;
+  scene.add(pages);
+
+  // ── BED (front-right corner — bottom-right of room from top view) ──
+  const bedMat = new THREE.MeshStandardMaterial({color:0x9a8a78, roughness:0.90});
+  const bedFrame = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.38, 2.2), bedMat);
+  bedFrame.position.set(3.4, 0.19, 2.6);
+  bedFrame.castShadow = bedFrame.receiveShadow = true;
+  scene.add(bedFrame);
+
+  const mattressMat = new THREE.MeshStandardMaterial({color:0xe8e0d0, roughness:0.95});
+  const mattress = new THREE.Mesh(new THREE.BoxGeometry(1.52, 0.18, 2.1), mattressMat);
+  mattress.position.set(3.4, 0.46, 2.6);
+  mattress.castShadow = mattress.receiveShadow = true;
+  scene.add(mattress);
+
+  // Sheet — slightly rumpled
+  const sheetMat = new THREE.MeshStandardMaterial({color:0xf2ece4, roughness:0.98});
+  const sheet = new THREE.Mesh(new THREE.BoxGeometry(1.48, 0.06, 1.4), sheetMat);
+  sheet.position.set(3.4, 0.57, 2.3);
+  sheet.castShadow = true;
+  scene.add(sheet);
+
+  // Pillow — one only
+  const pillowMat = new THREE.MeshStandardMaterial({color:0xf8f4ec, roughness:0.98});
+  const pillow = new THREE.Mesh(new THREE.BoxGeometry(0.65,0.1,0.45), pillowMat);
+  pillow.position.set(3.4, 0.58, 1.62);
+  pillow.castShadow = true;
+  scene.add(pillow);
+
+  // Bedside table — between bed and right wall
+  const bsMat = new THREE.MeshStandardMaterial({color:0x8a7a62, roughness:0.85});
+  const bsTable = new THREE.Mesh(new THREE.BoxGeometry(0.45, 0.6, 0.38), bsMat);
+  bsTable.position.set(4.28, 0.3, 2.6);
+  bsTable.castShadow = bsTable.receiveShadow = true;
+  scene.add(bsTable);
+
+  // Glass of water — half empty
+  const glassMat = new THREE.MeshPhysicalMaterial({
+    color:0xffffff, transparent:true, opacity:0.25, roughness:0.05, transmission:0.9
+  });
+  const waterGlass = new THREE.Mesh(new THREE.CylinderGeometry(0.04,0.035,0.12,18), glassMat);
+  waterGlass.position.set(4.26, 0.655, 2.6);
+  scene.add(waterGlass);
+  const water = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.037,0.033,0.06,18),
+    new THREE.MeshStandardMaterial({color:0xc8e0f0, transparent:true, opacity:0.55, roughness:0.1})
+  );
+  water.position.set(4.26, 0.63, 2.6);
+  scene.add(water);
+
+  // ── COAT HOOK (back wall — coat hanging alone) ──
+  const hookMat = new THREE.MeshStandardMaterial({color:0x3a2a1a, roughness:0.6, metalness:0.4});
+  const hook = new THREE.Mesh(new THREE.CylinderGeometry(0.018,0.018,0.12,8), hookMat);
+  hook.position.set(-1.0, 1.75, -CFG.rD/2+0.12);
+  hook.rotation.z = Math.PI/2;
+  scene.add(hook);
+
+  // Coat — single, still, no body inside
+  const coatMat = new THREE.MeshStandardMaterial({color:0x3a3228, roughness:0.92});
+  const coat = new THREE.Mesh(new THREE.BoxGeometry(0.52, 0.85, 0.12), coatMat);
+  coat.position.set(-1.0, 1.32, -CFG.rD/2+0.16);
+  coat.castShadow = true;
+  scene.add(coat);
+
+  // ── RADIATOR (left wall, below window — domestic, familiar) ──
+  const radMat = new THREE.MeshStandardMaterial({color:0xd8d2c4, roughness:0.7, metalness:0.3});
+  const rad = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.55, 1.1), radMat);
+  rad.position.set(-CFG.rW/2+0.18, 0.275, 0.8);
+  rad.castShadow = true;
+  scene.add(rad);
+  for(let i=0;i<5;i++) {
+    const fin = new THREE.Mesh(new THREE.BoxGeometry(0.10,0.5,0.06), radMat);
+    fin.position.set(-CFG.rW/2+0.18, 0.25, 0.38+i*0.18);
+    scene.add(fin);
+  }
+
+  // ── SMALL RUG (worn, center of room) ──
+  const rugMat = new THREE.MeshStandardMaterial({color:0x8a7060, roughness:0.97});
+  const rug = new THREE.Mesh(new THREE.PlaneGeometry(1.8, 1.2), rugMat);
+  rug.rotation.x = -Math.PI/2;
+  rug.position.set(0.5, 0.003, -0.5);
+  rug.receiveShadow = true;
+  scene.add(rug);
+
+  // ── WALL CLOCK (back wall — time passing, alone) ──
+  const clockFace = new THREE.Mesh(
+    new THREE.CircleGeometry(0.2, 32),
+    new THREE.MeshStandardMaterial({color:0xf5f0e4, roughness:0.85})
+  );
+  clockFace.position.set(1.5, 2.2, -CFG.rD/2+0.06);
+  scene.add(clockFace);
+  const clockRim = new THREE.Mesh(
+    new THREE.TorusGeometry(0.2, 0.022, 8, 32),
+    new THREE.MeshStandardMaterial({color:0x2a2018, roughness:0.7, metalness:0.2})
+  );
+  clockRim.position.set(1.5, 2.2, -CFG.rD/2+0.07);
+  scene.add(clockRim);
+  // Hour hand
+  const hHand = new THREE.Mesh(
+    new THREE.BoxGeometry(0.016, 0.11, 0.01),
+    new THREE.MeshStandardMaterial({color:0x1a1510})
+  );
+  hHand.position.set(1.5, 2.24, -CFG.rD/2+0.09);
+  hHand.rotation.z = -0.8;
+  scene.add(hHand);
+  // Minute hand
+  const mHand = new THREE.Mesh(
+    new THREE.BoxGeometry(0.010, 0.16, 0.01),
+    new THREE.MeshStandardMaterial({color:0x1a1510})
+  );
+  mHand.position.set(1.52, 2.21, -CFG.rD/2+0.09);
+  mHand.rotation.z = 0.5;
+  scene.add(mHand);
+
+  // ── DOOR (back wall, right side — OPEN, swung inward) ──
+  // The door is open. You can leave. You just have nowhere to go.
+  const doorMat = new THREE.MeshStandardMaterial({color:0xc8bfb0, roughness:0.84, metalness:0.05});
+
+  // Door panel — swung 90deg open, standing flat against right side of frame
+  const door = new THREE.Mesh(new THREE.BoxGeometry(0.06, 2.2, 1.0), doorMat);
+  door.position.set(3.8, 1.1, -CFG.rD/2+0.62);
+  door.castShadow = true;
+  scene.add(door);
+
+  // Door panels (recessed detail — 2 panels)
+  const panMat = new THREE.MeshStandardMaterial({color:0xbcb4a6, roughness:0.88});
+  [[0,-0.4],[0,0.38]].forEach(([pox,poz])=>{
+    const pan = new THREE.Mesh(new THREE.BoxGeometry(0.03,0.88,0.38), panMat);
+    pan.position.set(3.8-0.02, 1.1+pox, -CFG.rD/2+0.62+poz);
+    scene.add(pan);
+  });
+
+  // Door handle (brass knob)
+  const knobMat = new THREE.MeshStandardMaterial({color:0xb8923a, roughness:0.35, metalness:0.8});
+  const knob = new THREE.Mesh(new THREE.SphereGeometry(0.055, 14, 14), knobMat);
+  knob.position.set(3.82, 1.08, -CFG.rD/2+0.12);
+  scene.add(knob);
+  const knobStem = new THREE.Mesh(new THREE.CylinderGeometry(0.018,0.018,0.1,10), knobMat);
+  knobStem.rotation.z = Math.PI/2;
+  knobStem.position.set(3.84, 1.08, -CFG.rD/2+0.12);
+  scene.add(knobStem);
+
+  // Door frame — painted white, slightly worn
+  const dfMat = new THREE.MeshStandardMaterial({color:0xe0d8cc, roughness:0.78});
+  const dfTop = new THREE.Mesh(new THREE.BoxGeometry(1.12,0.09,0.13), dfMat);
+  dfTop.position.set(3.8, 2.26, -CFG.rD/2+0.06);
+  scene.add(dfTop);
+  const dfL = new THREE.Mesh(new THREE.BoxGeometry(0.09,2.3,0.13), dfMat);
+  dfL.position.set(3.23, 1.1, -CFG.rD/2+0.06);
+  scene.add(dfL);
+  const dfR = new THREE.Mesh(new THREE.BoxGeometry(0.09,2.3,0.13), dfMat);
+  dfR.position.set(4.37, 1.1, -CFG.rD/2+0.06);
+  scene.add(dfR);
+  // Door stop strip (the inner reveal)
+  const dStop = new THREE.Mesh(new THREE.BoxGeometry(1.0,2.28,0.05), dfMat);
+  dStop.position.set(3.8, 1.1, -CFG.rD/2+0.025);
+  scene.add(dStop);
+
+  // Door shadow on floor — a darker rectangle suggesting depth
+  const dShadow = new THREE.Mesh(
+    new THREE.PlaneGeometry(1.0,1.0),
+    new THREE.MeshStandardMaterial({color:0xa09080, transparent:true, opacity:0.15, roughness:1.0})
+  );
+  dShadow.rotation.x = -Math.PI/2;
+  dShadow.position.set(3.8, 0.004, -CFG.rD/2+0.62);
+  scene.add(dShadow);
+}
+
+function buildVoid() {
+  // VOCABULARY: void — the space beyond the room.
+  // Through the open door: a pale empty corridor.
+  // No darkness. Just more emptiness.
+  // This is the loneliness: you could walk out, but into what?
+
+  // Corridor beyond door — just pale plaster, receding
+  const corrMat = new THREE.MeshStandardMaterial({color:0xccc4b8, roughness:0.95});
+
+  // Corridor floor
+  const corrFloor = new THREE.Mesh(new THREE.PlaneGeometry(2.5, 5), corrMat);
+  corrFloor.rotation.x = -Math.PI/2;
+  corrFloor.position.set(3.8, 0.01, -CFG.rD/2-2.2);
+  scene.add(corrFloor);
+
+  // Corridor ceiling
+  const corrCeil = new THREE.Mesh(new THREE.PlaneGeometry(2.5, 5), corrMat);
+  corrCeil.rotation.x = Math.PI/2;
+  corrCeil.position.set(3.8, CFG.rH, -CFG.rD/2-2.2);
+  scene.add(corrCeil);
+
+  // Corridor walls
+  const corrL = new THREE.Mesh(new THREE.PlaneGeometry(5, CFG.rH), corrMat);
+  corrL.position.set(3.8-1.25, CFG.rH/2, -CFG.rD/2-2.2);
+  corrL.rotation.y = Math.PI/2;
+  scene.add(corrL);
+  const corrR = new THREE.Mesh(new THREE.PlaneGeometry(5, CFG.rH), corrMat);
+  corrR.position.set(3.8+1.25, CFG.rH/2, -CFG.rD/2-2.2);
+  corrR.rotation.y = -Math.PI/2;
+  scene.add(corrR);
+
+  // End wall of corridor — far away, slightly darker, just empty
+  const corrEnd = new THREE.Mesh(new THREE.PlaneGeometry(2.5, CFG.rH),
+    new THREE.MeshStandardMaterial({color:0xb8b0a4, roughness:0.95})
+  );
+  corrEnd.position.set(3.8, CFG.rH/2, -CFG.rD/2-4.5);
+  scene.add(corrEnd);
+
+  // A dim light in corridor — pale, cool, nobody there
+  const corrLight = new THREE.PointLight(0xc8c8c0, 0.2, 6);
+  corrLight.position.set(3.8, 2.5, -CFG.rD/2-2.0);
+  scene.add(corrLight);
+
+  // Wall beyond the room on right — closing the space gently
+  const backWallFill = new THREE.Mesh(
+    new THREE.PlaneGeometry(CFG.rW, CFG.rH),
+    new THREE.MeshStandardMaterial({color:0xbab2a6, roughness:0.95})
+  );
+  backWallFill.position.set(0, CFG.rH/2, -CFG.rD/2-0.01);
+  scene.add(backWallFill);
+}
+
+function setupControls() {
+  document.addEventListener('click', ()=> document.body.requestPointerLock());
+  document.addEventListener('keydown', e=> {
+    if(e.code==='KeyW') mF=true;
+    if(e.code==='KeyS') mB=true;
+    if(e.code==='KeyA') mL=true;
+    if(e.code==='KeyD') mR=true;
+    if(e.code==='KeyF' && !document.fullscreenElement) document.documentElement.requestFullscreen();
+  });
+  document.addEventListener('keyup', e=> {
+    if(e.code==='KeyW') mF=false;
+    if(e.code==='KeyS') mB=false;
+    if(e.code==='KeyA') mL=false;
+    if(e.code==='KeyD') mR=false;
+  });
+  document.addEventListener('mousemove', e=> {
+    if(document.pointerLockElement) {
+      camera.rotation.y -= e.movementX * CFG.mouseSens;
+      camera.rotation.x -= e.movementY * CFG.mouseSens;
+      camera.rotation.x = Math.max(-Math.PI/2.8, Math.min(Math.PI/2.8, camera.rotation.x));
+    }
+  });
+  window.addEventListener('resize', ()=> {
+    camera.aspect = innerWidth/innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(innerWidth, innerHeight);
+  });
+}
+
+function setupAudio() {
+  // SOUND VOCABULARY: stillness + distant life
+  // The sound of loneliness is NOT silence (silence = absence = fear).
+  // It is: distant urban hum, radiator ticking, the world going on elsewhere.
+  try {
+    const listener = new THREE.AudioListener();
+    camera.add(listener);
+    const ctx = listener.context;
+
+    // Very low-frequency room tone — not threatening, just the hum of being alive
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.value = 48; // room tone, barely perceptible
+    gain.gain.value = 0.025;
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start();
+
+    // Occasional distant radiator tick — warmth that doesn't reach you
+    function tick() {
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0, ctx.currentTime);
+      g.gain.linearRampToValueAtTime(0.035, ctx.currentTime+0.01);
+      g.gain.linearRampToValueAtTime(0, ctx.currentTime+0.08);
+      const b = ctx.createOscillator();
+      b.type = 'triangle';
+      b.frequency.value = 420 + Math.random()*80;
+      b.connect(g);
+      g.connect(ctx.destination);
+      b.start();
+      b.stop(ctx.currentTime+0.1);
+      // Next tick: irregular interval (2-8 seconds)
+      setTimeout(tick, 2000 + Math.random()*6000);
+    }
+    setTimeout(tick, 3000);
+
+  } catch(e) { /* audio not critical */ }
+}
+
+function animate() {
+  requestAnimationFrame(animate);
+  const delta = clock.getDelta();
+
+  // Movement
+  vel.x *= (1 - 14*delta);
+  vel.z *= (1 - 14*delta);
+  const dir = new THREE.Vector3();
+  dir.z = Number(mF) - Number(mB);
+  dir.x = Number(mR) - Number(mL);
+  dir.normalize();
+  if(mF||mB) vel.z -= dir.z * CFG.moveSpeed * delta;
+  if(mL||mR) vel.x -= dir.x * CFG.moveSpeed * delta;
+
+  const fwd = new THREE.Vector3();
+  camera.getWorldDirection(fwd);
+  fwd.y = 0; fwd.normalize();
+  const right = new THREE.Vector3();
+  right.crossVectors(camera.up, fwd).normalize();
+  camera.position.addScaledVector(fwd, vel.z);
+  camera.position.addScaledVector(right, vel.x);
+  camera.position.x = Math.max(-CFG.bound, Math.min(CFG.bound, camera.position.x));
+  camera.position.z = Math.max(-CFG.bound, Math.min(CFG.bound, camera.position.z));
+  camera.position.y = CFG.camH;
+
+  renderer.render(scene, camera);
+}
+
+if(document.readyState==='loading') document.addEventListener('DOMContentLoaded', init);
+else init();
+</script>
+</body>
+</html>

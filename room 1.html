@@ -1,0 +1,722 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hopper's Loneliness Room - Interactive VR Experience</title>
+    <style>
+        body { margin:0; overflow:hidden; font-family:'Helvetica Neue',Arial,sans-serif; background:#000; }
+        #info {
+            position:absolute; top:20px; left:20px; color:#fff;
+            background:rgba(0,0,0,0.7); padding:15px; border-radius:8px;
+            font-size:14px; max-width:320px; z-index:100; line-height:1.6;
+        }
+        #controls {
+            position:absolute; bottom:20px; left:50%; transform:translateX(-50%);
+            background:rgba(0,0,0,0.8); padding:15px 25px; border-radius:25px;
+            color:#fff; font-size:13px; z-index:100; text-align:center;
+        }
+        #interaction {
+            position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
+            background:rgba(0,0,0,0.85); color:#fff; padding:20px 30px;
+            border-radius:12px; font-size:16px; display:none; z-index:150;
+            text-align:center; pointer-events:none;
+        }
+        #crosshair {
+            position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
+            width:4px; height:4px; background:rgba(255,255,255,0.7);
+            border-radius:50%; border:2px solid rgba(0,0,0,0.5);
+            z-index:90; pointer-events:none;
+        }
+        #loading {
+            position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
+            color:#fff; font-size:24px; z-index:1000;
+        }
+        /* Vignette: low pixel-density periphery */
+        #vignette {
+            position:fixed; inset:0; pointer-events:none; z-index:80;
+            background: radial-gradient(
+                ellipse 65% 65% at 50% 50%,
+                transparent 48%,
+                rgba(0,0,0,0.50) 68%,
+                rgba(0,0,0,0.93) 100%
+            );
+        }
+        .fade-out { animation:fadeOut 2s forwards; }
+        .fade-in  { animation:fadeIn  0.3s forwards; }
+        @keyframes fadeOut { to { opacity:0; visibility:hidden; } }
+        @keyframes fadeIn  { from { opacity:0; } to { opacity:1; } }
+    </style>
+</head>
+<body>
+    <div id="loading">Loading Hopper's Loneliness Room...</div>
+    <div id="vignette"></div>
+    <div id="crosshair"></div>
+    <div id="interaction"></div>
+    <div id="info">
+        <strong>&#127912; Hopper's Loneliness Room</strong><br>
+        <small>Interactive VR Experience</small><br><br>
+        <em>Look at objects and press E to interact</em><br>
+        Press <strong>F</strong> for fullscreen &bull; Click to lock pointer
+    </div>
+    <div id="controls">
+        <strong>W A S D</strong> Move &bull; <strong>MOUSE</strong> Look &bull; <strong>E</strong> Interact
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script>
+    let scene, camera, renderer, clock, raycaster, mouse;
+    let moveForward=false, moveBackward=false, moveLeft=false, moveRight=false;
+    let velocity=new THREE.Vector3(), direction=new THREE.Vector3();
+    let doorLight, windowGlow, mainDirectional, rimLight, lampLight;
+    let lampShade, doorHandle;
+    let lampOn=false, doorAttempts=0;
+    let interactableObjects=[], currentLookingAt=null;
+
+    // ── VOCAB: Oversized room 12x12x18m; avatar 0.8x scale ──
+    const config = {
+        roomWidth:  12,
+        roomHeight: 18,
+        roomDepth:  12,
+        cameraHeight: 1.28 * 0.8,   // 0.8x undersized avatar = 1.024m eye height
+        // single directional light 0.8–1.2
+        lightIntensityMin: 0.8,
+        lightIntensityMax: 1.2,
+        lightColor: 0xffdfb0,
+        ambientIntensity: 0.14,
+        rimLightIntensity: 0.22,
+        windowHeight: 3.2,           // taller window — more prominent
+        windowWidth:  1.8,
+        windowSillHeight: 9.5,
+        exteriorColor: 0x1a3a52,
+        windowGlowIntensity: 0.55,
+        fogColor: 0x0a0a10,
+        fogNear: 11,
+        fogFar:  15,
+        moveSpeed: 2.5,
+        mouseSensitivity: 0.0018,
+        restrictionBoundary: 5.5,
+        pulseFrequency: 0.006,
+    };
+
+    // ── VOCAB 1: night cityscape — lightly blurred, readable buildings ──
+    function buildCityscapeTexture() {
+        const W=512, H=300;
+        const cv=document.createElement('canvas');
+        cv.width=W; cv.height=H;
+        const ctx=cv.getContext('2d');
+
+        // Night sky
+        const sky=ctx.createLinearGradient(0,0,0,H);
+        sky.addColorStop(0,'#030509');
+        sky.addColorStop(0.55,'#07101e');
+        sky.addColorStop(1,'#0f1a2a');
+        ctx.fillStyle=sky; ctx.fillRect(0,0,W,H);
+
+        // Stars (sparse)
+        for(let s=0;s<60;s++){
+            const sx=Math.random()*W, sy=Math.random()*(H*0.55);
+            const r=Math.random()*0.8+0.3;
+            ctx.beginPath(); ctx.arc(sx,sy,r,0,Math.PI*2);
+            ctx.fillStyle=`rgba(255,255,255,${0.3+Math.random()*0.5})`;
+            ctx.fill();
+        }
+
+        // Building silhouettes with distinct shapes
+        const blds=[
+            {x:0,   w:60,  h:140, lit:0.12},
+            {x:55,  w:35,  h:190, lit:0.18},
+            {x:85,  w:75,  h:110, lit:0.09},
+            {x:155, w:42,  h:210, lit:0.22},
+            {x:192, w:32,  h:160, lit:0.16},
+            {x:219, w:85,  h:125, lit:0.10},
+            {x:299, w:48,  h:220, lit:0.20},
+            {x:342, w:58,  h:145, lit:0.13},
+            {x:395, w:42,  h:185, lit:0.19},
+            {x:432, w:80,  h:118, lit:0.08},
+        ];
+
+        // Draw building outlines first (crisp silhouette)
+        blds.forEach(b=>{
+            ctx.fillStyle='#0b0f18';
+            ctx.fillRect(b.x, H-b.h, b.w, b.h);
+            // Roof antenna on taller ones
+            if(b.h>160){
+                ctx.fillStyle='#0b0f18';
+                ctx.fillRect(b.x+b.w/2-1, H-b.h-10, 2, 10);
+            }
+        });
+
+        // Windows — drawn after blur so they stay sharp-ish
+        // (we only blur once, lightly, after sky+buildings but before windows)
+        // Light blur for depth atmosphere only
+        const imgData=ctx.getImageData(0,0,W,H);
+        const d=imgData.data;
+        const out=new Uint8ClampedArray(d);
+        const radius=1; // single light pass — keep buildings readable
+        for(let y=radius;y<H-radius;y++){
+            for(let x=radius;x<W-radius;x++){
+                let r=0,g=0,bv=0,cnt=0;
+                for(let dy=-radius;dy<=radius;dy++){
+                    for(let dx=-radius;dx<=radius;dx++){
+                        const i=((y+dy)*W+(x+dx))*4;
+                        r+=d[i]; g+=d[i+1]; bv+=d[i+2]; cnt++;
+                    }
+                }
+                const oi=(y*W+x)*4;
+                out[oi]=r/cnt; out[oi+1]=g/cnt; out[oi+2]=bv/cnt; out[oi+3]=255;
+            }
+        }
+        imgData.data.set(out);
+        ctx.putImageData(imgData,0,0);
+
+        // Now draw windows ON TOP of the blur — crisp lit squares
+        blds.forEach(b=>{
+            const cols=Math.floor((b.w-4)/9);
+            const rows=Math.floor((b.h-10)/13);
+            for(let row=0;row<rows;row++){
+                for(let col=0;col<cols;col++){
+                    if(Math.random()<b.lit){
+                        const wx=b.x+3+col*9;
+                        const wy=H-b.h+6+row*13;
+                        const warm=Math.random()>0.38;
+                        ctx.fillStyle=warm
+                            ? `rgba(255,215,130,${0.7+Math.random()*0.25})`
+                            : `rgba(155,200,255,${0.6+Math.random()*0.3})`;
+                        ctx.fillRect(wx,wy,5,7);
+                        // Small glow halo around each window
+                        const grd=ctx.createRadialGradient(wx+2,wy+3,0,wx+2,wy+3,6);
+                        grd.addColorStop(0,warm?'rgba(255,200,80,0.18)':'rgba(120,180,255,0.15)');
+                        grd.addColorStop(1,'rgba(0,0,0,0)');
+                        ctx.fillStyle=grd;
+                        ctx.fillRect(wx-5,wy-5,15,16);
+                    }
+                }
+            }
+        });
+
+        // Street glow at base
+        const sg=ctx.createLinearGradient(0,H-28,0,H);
+        sg.addColorStop(0,'rgba(255,140,40,0)');
+        sg.addColorStop(1,'rgba(255,140,40,0.22)');
+        ctx.fillStyle=sg; ctx.fillRect(0,H-28,W,28);
+
+        // Very subtle final atmospheric haze (no blur — just colour wash)
+        ctx.fillStyle='rgba(4,8,18,0.28)'; ctx.fillRect(0,0,W,H);
+
+        const tex=new THREE.CanvasTexture(cv);
+        tex.needsUpdate=true;
+        return tex;
+    }
+
+    function init(){
+        scene=new THREE.Scene();
+        scene.background=new THREE.Color(0x0a0a10);
+        // ── VOCAB 3: fog near:11 far:15 ──
+        scene.fog=new THREE.Fog(config.fogColor, config.fogNear, config.fogFar);
+
+        // ── FOV widened slightly → more distance from objects ──
+        camera=new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 100);
+        camera.position.set(0, config.cameraHeight, config.roomDepth/2 - 1.8);
+
+        renderer=new THREE.WebGLRenderer({antialias:true});
+        renderer.setSize(window.innerWidth,window.innerHeight);
+        renderer.shadowMap.enabled=true;
+        renderer.shadowMap.type=THREE.PCFSoftShadowMap;
+        renderer.toneMapping=THREE.ACESFilmicToneMapping;
+        renderer.toneMappingExposure=0.85;
+        document.body.appendChild(renderer.domElement);
+
+        clock=new THREE.Clock();
+        raycaster=new THREE.Raycaster();
+        raycaster.far=5;
+        mouse=new THREE.Vector2(0,0);
+
+        const ambient=new THREE.AmbientLight(0x404558, config.ambientIntensity);
+        scene.add(ambient);
+
+        // ── VOCAB 2: single DirectionalLight, 0.8–1.2 dynamic ──
+        mainDirectional=new THREE.DirectionalLight(config.lightColor, 1.0);
+        mainDirectional.position.set(-4, config.roomHeight-5, 3);
+        mainDirectional.target.position.set(2, 0, -2);
+        mainDirectional.castShadow=true;
+        mainDirectional.shadow.mapSize.width=2048;
+        mainDirectional.shadow.mapSize.height=2048;
+        mainDirectional.shadow.bias=-0.0001;
+        scene.add(mainDirectional);
+        scene.add(mainDirectional.target);
+
+        rimLight=new THREE.DirectionalLight(0x3a4a5a, config.rimLightIntensity);
+        rimLight.position.set(5, 7, -4);
+        scene.add(rimLight);
+
+        createRoom();
+        createWindow();
+        createFurniture();
+        createObjects();
+        createExitDoor();
+        createDistantNPC();
+        createInfiniteDepth();  // ── VOCAB: infinite depth illusion
+        setupControls();
+        setupAudio();
+
+        setTimeout(()=>{ document.getElementById('loading').classList.add('fade-out'); },1000);
+        animate();
+    }
+
+    function createRoom(){
+        // ── 12x12x18m oversized room ──
+        const floorMat=new THREE.MeshStandardMaterial({color:0x5a4a38,roughness:0.92,metalness:0.02});
+        const floor=new THREE.Mesh(new THREE.PlaneGeometry(config.roomWidth,config.roomDepth),floorMat);
+        floor.rotation.x=-Math.PI/2; floor.receiveShadow=true;
+        scene.add(floor);
+
+        const wallMat=new THREE.MeshStandardMaterial({color:0x7a6d5e,roughness:0.90,metalness:0.01});
+
+        // Back wall
+        const bw=new THREE.Mesh(new THREE.PlaneGeometry(config.roomWidth,config.roomHeight),wallMat);
+        bw.position.set(0,config.roomHeight/2,-config.roomDepth/2); bw.receiveShadow=true;
+        scene.add(bw);
+
+        // Left wall
+        const lwg=new THREE.PlaneGeometry(config.roomDepth,config.roomHeight);
+        const lw=new THREE.Mesh(lwg,wallMat);
+        lw.position.set(-config.roomWidth/2,config.roomHeight/2,0);
+        lw.rotation.y=Math.PI/2; lw.receiveShadow=true;
+        scene.add(lw);
+
+        // Right wall
+        const rw=new THREE.Mesh(lwg.clone(),wallMat);
+        rw.position.set(config.roomWidth/2,config.roomHeight/2,0);
+        rw.rotation.y=-Math.PI/2; rw.receiveShadow=true;
+        scene.add(rw);
+
+        // Ceiling
+        const ceil=new THREE.Mesh(
+            new THREE.PlaneGeometry(config.roomWidth,config.roomDepth),
+            new THREE.MeshStandardMaterial({color:0x2a2520,roughness:0.95})
+        );
+        ceil.position.y=config.roomHeight; ceil.rotation.x=Math.PI/2;
+        scene.add(ceil);
+
+        // Front wall (camera side) — just side panels, open centre for camera
+        const fwMat=new THREE.MeshStandardMaterial({color:0x7a6d5e,roughness:0.90});
+        const fwL=new THREE.Mesh(new THREE.PlaneGeometry(2,config.roomHeight),fwMat);
+        fwL.position.set(-5,config.roomHeight/2,config.roomDepth/2);
+        fwL.rotation.y=Math.PI; scene.add(fwL);
+        const fwR=new THREE.Mesh(new THREE.PlaneGeometry(2,config.roomHeight),fwMat);
+        fwR.position.set(5,config.roomHeight/2,config.roomDepth/2);
+        fwR.rotation.y=Math.PI; scene.add(fwR);
+    }
+
+    function createWindow(){
+        // Window on left wall — larger and more prominent
+        const frameMat=new THREE.MeshStandardMaterial({color:0x2a2520,roughness:0.8});
+        const frame=new THREE.Mesh(
+            new THREE.BoxGeometry(config.windowWidth+0.18, config.windowHeight+0.18, 0.14),
+            frameMat
+        );
+        frame.position.set(-config.roomWidth/2+0.06, config.windowSillHeight+config.windowHeight/2, 0);
+        scene.add(frame);
+
+        // Cross divider bars
+        const barH=new THREE.Mesh(new THREE.BoxGeometry(config.windowWidth,0.06,0.10),frameMat);
+        barH.position.set(-config.roomWidth/2+0.08, config.windowSillHeight+config.windowHeight/2, 0);
+        scene.add(barH);
+        const barV=new THREE.Mesh(new THREE.BoxGeometry(0.06,config.windowHeight,0.10),frameMat);
+        barV.position.set(-config.roomWidth/2+0.08, config.windowSillHeight+config.windowHeight/2, 0);
+        scene.add(barV);
+
+        // ── VOCAB 1: lightly blurred night cityscape — readable, obviously a window ──
+        const cityTex=buildCityscapeTexture();
+        const glassMat=new THREE.MeshPhysicalMaterial({
+            map: cityTex,
+            color: 0xffffff,
+            transparent: true,
+            opacity: 0.92,        // high opacity — texture clearly visible
+            roughness: 0.12,      // slight frosting
+            metalness: 0.04,
+        });
+        const glass=new THREE.Mesh(
+            new THREE.PlaneGeometry(config.windowWidth, config.windowHeight),
+            glassMat
+        );
+        glass.position.set(-config.roomWidth/2+0.11, config.windowSillHeight+config.windowHeight/2, 0);
+        glass.rotation.y=Math.PI/2;
+        scene.add(glass);
+
+        // Cool blue bleed light from exterior
+        windowGlow=new THREE.PointLight(0x4d78a8, config.windowGlowIntensity, 9);
+        windowGlow.position.set(-config.roomWidth/2-1, config.windowSillHeight+1.5, 0);
+        scene.add(windowGlow);
+
+        // Blue floor pool from window
+        const floorBlue=new THREE.PointLight(0x3a5a88, 0.32, 6);
+        floorBlue.position.set(-config.roomWidth/2+2, 0.5, 0);
+        scene.add(floorBlue);
+
+        // Window sill
+        const sill=new THREE.Mesh(
+            new THREE.BoxGeometry(config.windowWidth+0.22,0.12,0.24),
+            new THREE.MeshStandardMaterial({color:0x4a3f35,roughness:0.85})
+        );
+        sill.position.set(-config.roomWidth/2+0.1, config.windowSillHeight-0.08, 0);
+        scene.add(sill);
+    }
+
+    function createFurniture(){
+        const chairMat=new THREE.MeshStandardMaterial({color:0x5a4535,roughness:0.85,metalness:0.05});
+        const seat=new THREE.Mesh(new THREE.BoxGeometry(0.75,0.05,0.75),chairMat);
+        seat.position.set(1.5,0.85,-2.5); seat.castShadow=true; seat.receiveShadow=true;
+        scene.add(seat);
+        const back=new THREE.Mesh(new THREE.BoxGeometry(0.75,0.85,0.05),chairMat);
+        back.position.set(1.5,1.25,-2.9); back.castShadow=true; back.receiveShadow=true;
+        scene.add(back);
+        for(let i=0;i<4;i++){
+            const leg=new THREE.Mesh(new THREE.CylinderGeometry(0.04,0.04,0.85),chairMat);
+            leg.position.set(1.5+(i%2?0.32:-0.32),0.425,-2.5+(i<2?0.32:-0.32));
+            leg.castShadow=true; scene.add(leg);
+        }
+        // Near NPC
+        const nm=new THREE.MeshStandardMaterial({color:0x1a1a1a,roughness:0.95});
+        const nb=new THREE.Mesh(new THREE.CylinderGeometry(0.28,0.28,1.65),nm);
+        nb.position.set(-3.5,0.825,-4.2); nb.rotation.y=Math.PI/3; nb.castShadow=true;
+        scene.add(nb);
+        const nh=new THREE.Mesh(new THREE.SphereGeometry(0.22),nm);
+        nh.position.set(-3.5,1.75,-4.2); nh.castShadow=true;
+        scene.add(nh);
+    }
+
+    function createObjects(){
+        const tMat=new THREE.MeshStandardMaterial({color:0x6a5a48,roughness:0.82,metalness:0.08});
+        const top=new THREE.Mesh(new THREE.BoxGeometry(1.2,0.06,0.8),tMat);
+        top.position.set(-1.8,0.72,1.2); top.castShadow=true; top.receiveShadow=true;
+        scene.add(top);
+        for(let i=0;i<4;i++){
+            const l=new THREE.Mesh(new THREE.CylinderGeometry(0.04,0.04,0.72),tMat);
+            l.position.set(-1.8+(i%2?0.52:-0.52),0.36,1.2+(i<2?0.35:-0.35));
+            l.castShadow=true; scene.add(l);
+        }
+        const cupMat=new THREE.MeshStandardMaterial({color:0xe8dcc8,roughness:0.65,metalness:0.15});
+        const cup=new THREE.Mesh(new THREE.CylinderGeometry(0.045,0.04,0.09,16),cupMat);
+        cup.position.set(-1.6,0.795,1.15); cup.castShadow=true; scene.add(cup);
+        const coffee=new THREE.Mesh(
+            new THREE.CylinderGeometry(0.042,0.038,0.05,16),
+            new THREE.MeshStandardMaterial({color:0x3a2a1a,roughness:0.3})
+        );
+        coffee.position.set(-1.6,0.77,1.15); scene.add(coffee);
+        const handle=new THREE.Mesh(new THREE.TorusGeometry(0.03,0.008,8,16,Math.PI),cupMat);
+        handle.position.set(-1.55,0.795,1.15);
+        handle.rotation.y=-Math.PI/2; handle.rotation.z=Math.PI/2;
+        scene.add(handle);
+        const bookMat=new THREE.MeshStandardMaterial({color:0x4a3a2a,roughness:0.88});
+        const book=new THREE.Mesh(new THREE.BoxGeometry(0.25,0.04,0.18),bookMat);
+        book.position.set(-2.0,0.77,1.3); book.rotation.y=0.3;
+        book.castShadow=true; book.receiveShadow=true; scene.add(book);
+        const pages=new THREE.Mesh(
+            new THREE.BoxGeometry(0.24,0.035,0.17),
+            new THREE.MeshStandardMaterial({color:0xf5f0e8,roughness:0.95})
+        );
+        pages.position.set(-2.0,0.77,1.3); pages.rotation.y=0.3; scene.add(pages);
+
+        // LAMP
+        const lsMat=new THREE.MeshStandardMaterial({color:0x3a3530,roughness:0.7,metalness:0.3});
+        const lb=new THREE.Mesh(new THREE.CylinderGeometry(0.15,0.18,0.05,16),lsMat);
+        lb.position.set(3.2,0.025,2.5); lb.castShadow=true; scene.add(lb);
+        const lp=new THREE.Mesh(new THREE.CylinderGeometry(0.025,0.025,1.6,12),lsMat);
+        lp.position.set(3.2,0.85,2.5); lp.castShadow=true; scene.add(lp);
+        lampShade=new THREE.Mesh(
+            new THREE.ConeGeometry(0.22,0.35,16),
+            new THREE.MeshStandardMaterial({color:0xc8b8a0,roughness:0.85,emissive:0x000000,emissiveIntensity:0})
+        );
+        lampShade.position.set(3.2,1.55,2.5); lampShade.castShadow=true;
+        lampShade.userData={type:'lamp',interactable:true};
+        scene.add(lampShade); interactableObjects.push(lampShade);
+        lampLight=new THREE.PointLight(0xffdfb0,0,4);
+        lampLight.position.set(3.2,1.45,2.5); lampLight.castShadow=true; scene.add(lampLight);
+
+        const rug=new THREE.Mesh(
+            new THREE.PlaneGeometry(2.0,1.5),
+            new THREE.MeshStandardMaterial({color:0x6a5545,roughness:0.95})
+        );
+        rug.rotation.x=-Math.PI/2; rug.position.set(1.3,0.01,-2.3);
+        rug.receiveShadow=true; scene.add(rug);
+
+        // Clock
+        const cf=new THREE.Mesh(
+            new THREE.CylinderGeometry(0.25,0.25,0.05,32),
+            new THREE.MeshStandardMaterial({color:0x2a2520,roughness:0.7,metalness:0.3})
+        );
+        cf.rotation.x=Math.PI/2; cf.position.set(0,2.8,-config.roomDepth/2+0.05);
+        cf.castShadow=true; scene.add(cf);
+        const cface=new THREE.Mesh(
+            new THREE.CircleGeometry(0.23,32),
+            new THREE.MeshStandardMaterial({color:0xf5f0e8,roughness:0.8})
+        );
+        cface.position.set(0,2.8,-config.roomDepth/2+0.08); scene.add(cface);
+        const hm=new THREE.MeshStandardMaterial({color:0x1a1a1a});
+        const hh=new THREE.Mesh(new THREE.BoxGeometry(0.02,0.12,0.01),hm);
+        hh.position.set(0,2.86,-config.roomDepth/2+0.09); scene.add(hh);
+        const mnh=new THREE.Mesh(new THREE.BoxGeometry(0.01,0.18,0.01),hm);
+        mnh.position.set(0.09,2.8,-config.roomDepth/2+0.09); scene.add(mnh);
+
+        // Fallen glass
+        const glassObj=new THREE.Mesh(
+            new THREE.CylinderGeometry(0.04,0.035,0.12,16),
+            new THREE.MeshPhysicalMaterial({color:0xffffff,transparent:true,opacity:0.3,roughness:0.05,metalness:0.1,transmission:0.95})
+        );
+        glassObj.position.set(-0.5,0.06,-0.8); glassObj.rotation.z=0.3;
+        glassObj.castShadow=true; scene.add(glassObj);
+
+        // Curtain
+        const curtL=new THREE.Mesh(
+            new THREE.PlaneGeometry(0.5,config.windowHeight-0.3),
+            new THREE.MeshStandardMaterial({color:0x6a5a4a,roughness:0.92,side:THREE.DoubleSide})
+        );
+        curtL.position.set(-config.roomWidth/2+0.15, config.windowSillHeight+config.windowHeight/2,-0.65);
+        curtL.rotation.y=Math.PI/2; scene.add(curtL);
+
+        // Radiator
+        const radMat=new THREE.MeshStandardMaterial({color:0xd4c9b8,roughness:0.7,metalness:0.4});
+        const rad=new THREE.Mesh(new THREE.BoxGeometry(1.0,0.5,0.15),radMat);
+        rad.position.set(-config.roomWidth/2+0.2,0.25,0); scene.add(rad);
+        for(let i=0;i<5;i++){
+            const seg=new THREE.Mesh(new THREE.BoxGeometry(0.15,0.45,0.12),radMat);
+            seg.position.set(-config.roomWidth/2+0.2,0.25,-0.4+i*0.2); scene.add(seg);
+        }
+
+        // Coat hook
+        const hkMat=new THREE.MeshStandardMaterial({color:0x3a2a1a,roughness:0.6,metalness:0.4});
+        const hk=new THREE.Mesh(new THREE.CylinderGeometry(0.02,0.02,0.15,8),hkMat);
+        hk.position.set(1.8,1.6,-config.roomDepth/2+0.1); hk.rotation.z=Math.PI/2; scene.add(hk);
+        const coat=new THREE.Mesh(
+            new THREE.BoxGeometry(0.45,0.7,0.15),
+            new THREE.MeshStandardMaterial({color:0x2a2520,roughness:0.9})
+        );
+        coat.position.set(1.8,1.25,-config.roomDepth/2+0.15);
+        coat.castShadow=true; scene.add(coat);
+    }
+
+    function createExitDoor(){
+        const dMat=new THREE.MeshStandardMaterial({color:0x4a3a2a,roughness:0.85,metalness:0.08});
+        const door=new THREE.Mesh(new THREE.BoxGeometry(1.1,2.4,0.08),dMat);
+        door.position.set(2.8,1.2,-config.roomDepth/2+0.08);
+        door.castShadow=true; door.receiveShadow=true;
+        door.userData={type:'door',interactable:true};
+        scene.add(door); interactableObjects.push(door);
+        const fMat=new THREE.MeshStandardMaterial({color:0x2a2520,roughness:0.88});
+        for(let i=0;i<2;i++){
+            const fr=new THREE.Mesh(new THREE.BoxGeometry(0.08,2.6,0.12),fMat);
+            fr.position.set(2.8+(i===0?-0.6:0.6),1.3,-config.roomDepth/2+0.04); scene.add(fr);
+        }
+        doorHandle=new THREE.Mesh(
+            new THREE.SphereGeometry(0.07),
+            new THREE.MeshStandardMaterial({color:0x8b7355,metalness:0.7,roughness:0.3})
+        );
+        doorHandle.position.set(3.35,1.05,-config.roomDepth/2+0.12);
+        doorHandle.userData={type:'door',interactable:true};
+        scene.add(doorHandle); interactableObjects.push(doorHandle);
+        doorLight=new THREE.PointLight(0xffd89a,0.3,3);
+        doorLight.position.set(2.8,0.05,-config.roomDepth/2+0.4); scene.add(doorLight);
+    }
+
+    // ── VOCAB 4: distant frozen silhouette NPC at fog boundary ──
+    function createDistantNPC(){
+        const sm=new THREE.MeshStandardMaterial({color:0x060608,roughness:1.0,transparent:true,opacity:0.85});
+        const body=new THREE.Mesh(new THREE.CylinderGeometry(0.18,0.18,1.6,10),sm);
+        body.position.set(1.2,0.8,-14.5); scene.add(body);
+        const head=new THREE.Mesh(new THREE.SphereGeometry(0.16,10,10),sm);
+        head.position.set(1.2,1.72,-14.5); scene.add(head);
+        const armR=new THREE.Mesh(new THREE.CylinderGeometry(0.055,0.055,0.72,8),sm);
+        armR.position.set(1.52,0.95,-14.5); armR.rotation.z=-0.38; scene.add(armR);
+        const armL=new THREE.Mesh(new THREE.CylinderGeometry(0.055,0.055,0.68,8),sm);
+        armL.position.set(0.88,0.92,-14.5); armL.rotation.z=0.15; scene.add(armL);
+    }
+
+    // ── VOCAB: infinite depth illusion — receding floor/ceiling grid lines ──
+    function createInfiniteDepth(){
+        // Receding parallel floor lines (perspective convergence)
+        const lineMat=new THREE.LineBasicMaterial({color:0x4a3e32,transparent:true,opacity:0.35});
+        const lineCount=9;
+        for(let i=0;i<lineCount;i++){
+            const t=(i/(lineCount-1))*2-1; // -1 to 1
+            const x=t*(config.roomWidth/2*0.92);
+            const pts=[
+                new THREE.Vector3(x,0.005, config.roomDepth/2),
+                new THREE.Vector3(x,0.005,-config.roomDepth/2)
+            ];
+            const geo=new THREE.BufferGeometry().setFromPoints(pts);
+            scene.add(new THREE.Line(geo,lineMat));
+        }
+        // Receding ceiling lines
+        const ceilLineMat=new THREE.LineBasicMaterial({color:0x2a2520,transparent:true,opacity:0.25});
+        for(let i=0;i<lineCount;i++){
+            const t=(i/(lineCount-1))*2-1;
+            const x=t*(config.roomWidth/2*0.92);
+            const pts=[
+                new THREE.Vector3(x,config.roomHeight-0.01, config.roomDepth/2),
+                new THREE.Vector3(x,config.roomHeight-0.01,-config.roomDepth/2)
+            ];
+            const geo=new THREE.BufferGeometry().setFromPoints(pts);
+            scene.add(new THREE.Line(geo,ceilLineMat));
+        }
+        // Deep black plane beyond the back wall — infinite depth anchor
+        const abyss=new THREE.Mesh(
+            new THREE.PlaneGeometry(40,40),
+            new THREE.MeshBasicMaterial({color:0x000000})
+        );
+        abyss.position.set(0,config.roomHeight/2,-config.roomDepth/2-0.5);
+        scene.add(abyss);
+
+        // Additional corridor receding into void on left (behind window wall)
+        const voidLeft=new THREE.Mesh(
+            new THREE.PlaneGeometry(20,20),
+            new THREE.MeshBasicMaterial({color:0x000000})
+        );
+        voidLeft.position.set(-config.roomWidth/2-0.5, config.roomHeight/2, 0);
+        voidLeft.rotation.y=Math.PI/2;
+        scene.add(voidLeft);
+    }
+
+    function setupControls(){
+        document.addEventListener('click',()=>{ document.body.requestPointerLock(); });
+        document.addEventListener('keydown',(e)=>{
+            switch(e.code){
+                case 'KeyW': moveForward=true; break;
+                case 'KeyS': moveBackward=true; break;
+                case 'KeyA': moveLeft=true; break;
+                case 'KeyD': moveRight=true; break;
+                case 'KeyF':
+                    if(!document.fullscreenElement) document.documentElement.requestFullscreen();
+                    break;
+                case 'KeyE': e.preventDefault(); handleInteraction(); break;
+            }
+        });
+        document.addEventListener('keyup',(e)=>{
+            switch(e.code){
+                case 'KeyW': moveForward=false; break;
+                case 'KeyS': moveBackward=false; break;
+                case 'KeyA': moveLeft=false; break;
+                case 'KeyD': moveRight=false; break;
+            }
+        });
+        document.addEventListener('mousemove',(e)=>{
+            if(document.pointerLockElement){
+                camera.rotation.y -= e.movementX*config.mouseSensitivity;
+                camera.rotation.x -= e.movementY*config.mouseSensitivity;
+                camera.rotation.x=Math.max(-Math.PI/3,Math.min(Math.PI/3,camera.rotation.x));
+            }
+        });
+        window.addEventListener('resize',()=>{
+            camera.aspect=window.innerWidth/window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth,window.innerHeight);
+        });
+    }
+
+    function setupAudio(){
+        const listener=new THREE.AudioListener();
+        camera.add(listener);
+        const ctx=listener.context;
+        const osc=ctx.createOscillator();
+        const gain=ctx.createGain();
+        osc.type='sine'; osc.frequency.setValueAtTime(27,ctx.currentTime);
+        gain.gain.setValueAtTime(0.06,ctx.currentTime);
+        osc.connect(gain); gain.connect(ctx.destination); osc.start();
+    }
+
+    function handleInteraction(){
+        if(!currentLookingAt) return;
+        if(currentLookingAt.userData.type==='door') attemptExitDoor();
+        else if(currentLookingAt.userData.type==='lamp') toggleLamp();
+    }
+
+    function attemptExitDoor(){
+        doorAttempts++;
+        const door=interactableObjects.find(o=>o.userData.type==='door'&&o.geometry.type==='BoxGeometry');
+        if(door){
+            const oz=door.position.z;
+            door.position.z+=0.02;
+            setTimeout(()=>{ door.position.z=oz-0.01; setTimeout(()=>{ door.position.z=oz; },50); },50);
+        }
+        const or2=doorHandle.rotation.z;
+        doorHandle.rotation.z=0.3;
+        setTimeout(()=>{ doorHandle.rotation.z=-0.3; setTimeout(()=>{ doorHandle.rotation.z=or2; },100); },100);
+        doorLight.intensity=0.9; setTimeout(()=>{ doorLight.intensity=0.3; },300);
+        const msgs=["The door won't open...","It's locked.","There's no way out.","..."];
+        showMessage(msgs[Math.min(doorAttempts-1,3)]);
+        const oy=camera.position.y;
+        camera.position.y+=0.04; setTimeout(()=>{ camera.position.y=oy; },80);
+    }
+
+    function toggleLamp(){
+        lampOn=!lampOn;
+        if(lampOn){
+            lampLight.intensity=0.08;
+            lampShade.material.emissive.setHex(0xffdfb0);
+            lampShade.material.emissiveIntensity=0.05;
+            showMessage("The lamp barely illuminates...");
+        } else {
+            lampLight.intensity=0;
+            lampShade.material.emissive.setHex(0x000000);
+            lampShade.material.emissiveIntensity=0;
+            showMessage("Lamp off.");
+        }
+    }
+
+    function showMessage(text){
+        const el=document.getElementById('interaction');
+        el.textContent=text; el.style.display='block'; el.classList.add('fade-in');
+        setTimeout(()=>{ el.style.display='none'; el.classList.remove('fade-in'); },2500);
+    }
+
+    function checkLookingAt(){
+        raycaster.setFromCamera(mouse,camera);
+        const hits=raycaster.intersectObjects(interactableObjects);
+        const ch=document.getElementById('crosshair');
+        if(hits.length>0){
+            currentLookingAt=hits[0].object;
+            ch.style.background='rgba(255,255,100,0.9)'; ch.style.width='8px'; ch.style.height='8px';
+        } else {
+            currentLookingAt=null;
+            ch.style.background='rgba(255,255,255,0.7)'; ch.style.width='4px'; ch.style.height='4px';
+        }
+    }
+
+    function updateMovement(delta){
+        velocity.x-=velocity.x*12.0*delta; velocity.z-=velocity.z*12.0*delta;
+        direction.z=Number(moveForward)-Number(moveBackward);
+        direction.x=Number(moveRight)-Number(moveLeft);
+        direction.normalize();
+        if(moveForward||moveBackward) velocity.z-=direction.z*config.moveSpeed*delta;
+        if(moveLeft||moveRight)       velocity.x-=direction.x*config.moveSpeed*delta;
+        const fwd=new THREE.Vector3(); camera.getWorldDirection(fwd);
+        fwd.y=0; fwd.normalize();
+        const right=new THREE.Vector3(); right.crossVectors(camera.up,fwd).normalize();
+        camera.position.addScaledVector(fwd,velocity.z);
+        camera.position.addScaledVector(right,velocity.x);
+        camera.position.x=Math.max(-config.restrictionBoundary,Math.min(config.restrictionBoundary,camera.position.x));
+        camera.position.z=Math.max(-config.restrictionBoundary,Math.min(config.restrictionBoundary,camera.position.z));
+        camera.position.y=config.cameraHeight;
+    }
+
+    function animate(){
+        requestAnimationFrame(animate);
+        const delta=clock.getDelta();
+        const time=clock.getElapsedTime();
+        updateMovement(delta);
+        checkLookingAt();
+        // ── VOCAB 2: directional light pulse 0.8–1.2 ──
+        const pulse=(Math.sin(time*config.pulseFrequency*Math.PI*2)+1)/2;
+        mainDirectional.intensity=config.lightIntensityMin+pulse*(config.lightIntensityMax-config.lightIntensityMin);
+        const wPulse=Math.sin(time*0.3)*0.07;
+        windowGlow.intensity=config.windowGlowIntensity+wPulse;
+        renderer.render(scene,camera);
+    }
+
+    if(document.readyState==='loading'){
+        document.addEventListener('DOMContentLoaded',init);
+    } else { init(); }
+    </script>
+</body>
+</html>
